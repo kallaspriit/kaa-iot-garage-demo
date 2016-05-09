@@ -5,12 +5,19 @@ import org.kaaproject.kaa.client.Kaa;
 import org.kaaproject.kaa.client.KaaClient;
 import org.kaaproject.kaa.client.SimpleKaaClientStateListener;
 import org.kaaproject.kaa.client.configuration.base.SimpleConfigurationStorage;
+import org.kaaproject.kaa.client.notification.NotificationListener;
+import org.kaaproject.kaa.client.notification.NotificationTopicListListener;
+import org.kaaproject.kaa.client.notification.UnavailableTopicException;
+import org.kaaproject.kaa.common.endpoint.gen.SubscriptionType;
+import org.kaaproject.kaa.common.endpoint.gen.Topic;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.List;
 
 public class GarageApplication {
     private static final Logger LOG = LoggerFactory.getLogger(GarageApplication.class);
@@ -22,6 +29,29 @@ public class GarageApplication {
         DOOR,
         REMOTE
     };
+
+    private static class BasicNotificationTopicListListener implements NotificationTopicListListener {
+        @Override
+        public void onListUpdated(List<Topic> list) {
+            LOG.info("Topic list was updated");
+
+            showTopicList(list);
+
+            try {
+                // try to subscribe to all new optional topics, if any
+                List<Long> optionalTopics = extractOptionalTopicIds(list);
+
+                for(Long optionalTopicId : optionalTopics){
+                    LOG.info("Subscribing to optional topic {}", optionalTopicId);
+                }
+
+                // subscribe to the topic
+                client.subscribeToTopics(optionalTopics, true);
+            } catch (UnavailableTopicException e) {
+                LOG.error("Topic is unavailable, can't subscribe: {}", e.getMessage());
+            }
+        }
+    }
 
     public static void main(String[] args) throws Exception {
         Mode mode;
@@ -82,6 +112,29 @@ public class GarageApplication {
             stateListener
         );
 
+        // setup notification topic list listener
+        NotificationTopicListListener topicListListener = new BasicNotificationTopicListListener();
+        client.addTopicListListener(topicListListener);
+
+        // listen for notifications
+        client.addNotificationListener(new NotificationListener() {
+            @Override
+            public void onNotification(long topicId, GarageDoorStateChangeNotification notification) {
+                LOG.info("Notification for topic id [{}] received.", topicId);
+
+                boolean isOpen = notification.getIsOpen();
+                boolean isOpening = notification.getIsOpening();
+                boolean isClosing = notification.getIsClosing();
+
+                LOG.info(
+                    "State updated "
+                    + "isOpen=" + (isOpen ? "yes" : "no") + ", "
+                    + "isOpening=" + (isOpening ? "yes" : "no") + ", "
+                    + "isClosing=" + (isClosing ? "yes" : "no") + ", "
+                );
+            }
+        });
+
         // setup profile container
         GarageDoorProfile profile = new GarageDoorProfile("SN12301231", OperatingSystem.Java, "1.4.2");
 
@@ -103,6 +156,10 @@ public class GarageApplication {
         // start the client
         client.start();
 
+        // display list of notification topics
+        List<Topic> topicList = client.getTopics();
+        showTopicList(topicList);
+
         switch (mode) {
             case DOOR:
                 startDoorMode();
@@ -115,6 +172,9 @@ public class GarageApplication {
             default:
                 return;
         }
+
+        // remove the listener
+        client.removeTopicListListener(topicListListener);
 
         // Stop the Kaa client and release all the resources which were in use.
         client.stop();
@@ -207,5 +267,25 @@ public class GarageApplication {
         }
 
         return userInput;
+    }
+
+    private static List<Long> extractOptionalTopicIds(List<Topic> list) {
+        List<Long> topicIds = new ArrayList<>();
+        for (Topic t : list) {
+            if (t.getSubscriptionType() == SubscriptionType.OPTIONAL_SUBSCRIPTION) {
+                topicIds.add(t.getId());
+            }
+        }
+        return topicIds;
+    }
+
+    private static void showTopicList(List<Topic> topics) {
+        if (topics == null || topics.isEmpty()) {
+            LOG.info("Topic list is empty");
+        } else {
+            for (Topic topic : topics) {
+                LOG.info("Topic id: {}, name: {}, type: {}", topic.getId(), topic.getName(), topic.getSubscriptionType());
+            }
+        }
     }
 }
