@@ -1,0 +1,10 @@
+<component name="ArtifactManager">
+  <artifact type="jar" name="Garage:jar">
+    <output-path>$PROJECT_DIR$</output-path>
+    <root id="archive" name="Garage.jar">
+      <element id="module-output" name="Garage" />
+      <element id="extracted-dir" path="$PROJECT_DIR$/lib/kaa-java-ep-sdk-zYF4qYQsbT3BRjDArJRIUiVQCEs.jar" path-in-jar="/" />
+      <element id="extracted-dir" path="$PROJECT_DIR$/lib/slf4j-jdk14-1.7.21.jar" path-in-jar="/" />
+    </root>
+  </artifact>
+</component>
