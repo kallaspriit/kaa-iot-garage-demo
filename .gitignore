@@ -1,3 +1,6 @@
 /out
 /key.public
 /key.private
+/run
+/state.properties_bckp
+/state.properties

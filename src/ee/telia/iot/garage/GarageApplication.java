@@ -5,9 +5,11 @@ import org.kaaproject.kaa.client.Kaa;
 import org.kaaproject.kaa.client.KaaClient;
 import org.kaaproject.kaa.client.SimpleKaaClientStateListener;
 import org.kaaproject.kaa.client.configuration.base.SimpleConfigurationStorage;
-import org.kaaproject.kaa.client.notification.NotificationListener;
+import org.kaaproject.kaa.client.event.EventFamilyFactory;
+import org.kaaproject.kaa.client.event.FindEventListenersCallback;
 import org.kaaproject.kaa.client.notification.NotificationTopicListListener;
 import org.kaaproject.kaa.client.notification.UnavailableTopicException;
+import org.kaaproject.kaa.client.transact.TransactionId;
 import org.kaaproject.kaa.common.endpoint.gen.SubscriptionType;
 import org.kaaproject.kaa.common.endpoint.gen.Topic;
 import org.slf4j.Logger;
@@ -17,18 +19,22 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.List;
 
 public class GarageApplication {
     private static final Logger LOG = LoggerFactory.getLogger(GarageApplication.class);
+    private static final String USER_EXTERNAL_ID = "test@example.com";
+    private static final String USER_ACCESS_TOKEN = "xxx";
 
     private static KaaClient client;
-    private static DesktopKaaPlatformContext platformContext;
+    private static EventFamilyFactory eventFamilyFactory;
+    private static GarageEventClassFamily garageEventClassFamily;
     private enum Mode {
         INVALID,
         DOOR,
         REMOTE
-    };
+    }
 
     private static class BasicNotificationTopicListListener implements NotificationTopicListListener {
         @Override
@@ -85,7 +91,7 @@ public class GarageApplication {
         LOG.info("-- starting garage application --");
 
         // use desktop platform context
-        platformContext = new DesktopKaaPlatformContext();
+        DesktopKaaPlatformContext platformContext = new DesktopKaaPlatformContext();
 
         // setup state listener
         SimpleKaaClientStateListener stateListener = new SimpleKaaClientStateListener() {
@@ -117,33 +123,30 @@ public class GarageApplication {
         client.addTopicListListener(topicListListener);
 
         // listen for notifications
-        client.addNotificationListener(new NotificationListener() {
-            @Override
-            public void onNotification(long topicId, GarageDoorStateChangeNotification notification) {
-                LOG.info("Notification for topic id [{}] received.", topicId);
+        client.addNotificationListener((topicId, notification) -> {
+            LOG.info("Notification for topic id [{}] received.", topicId);
 
-                boolean isOpen = notification.getIsOpen();
-                boolean isOpening = notification.getIsOpening();
-                boolean isClosing = notification.getIsClosing();
+            boolean isOpen = notification.getIsOpen();
+            boolean isOpening = notification.getIsOpening();
+            boolean isClosing = notification.getIsClosing();
 
-                LOG.info(
-                    "State updated "
-                    + "isOpen=" + (isOpen ? "yes" : "no") + ", "
-                    + "isOpening=" + (isOpening ? "yes" : "no") + ", "
-                    + "isClosing=" + (isClosing ? "yes" : "no") + ", "
-                );
-            }
+            LOG.info(
+                "State updated "
+                + "isOpen=" + (isOpen ? "yes" : "no") + ", "
+                + "isOpening=" + (isOpening ? "yes" : "no") + ", "
+                + "isClosing=" + (isClosing ? "yes" : "no") + ", "
+            );
         });
 
         // setup profile container
-        GarageDoorProfile profile = new GarageDoorProfile("SN12301231", OperatingSystem.Java, "1.4.2");
+        GarageDoorProfile profile = new GarageDoorProfile("SN12301231-" + mode, OperatingSystem.Java, "1.4.2");
 
         // set the profile container
         client.setProfileContainer(() -> profile);
 
         // persist configuration
         client.setConfigurationStorage(
-                new SimpleConfigurationStorage(platformContext, "configuration.cfg")
+            new SimpleConfigurationStorage(platformContext, "configuration.cfg")
         );
 
         // listen for configuration changes
@@ -160,6 +163,21 @@ public class GarageApplication {
         List<Topic> topicList = client.getTopics();
         showTopicList(topicList);
 
+        // attach to a user
+        client.attachUser(mode + USER_EXTERNAL_ID, USER_ACCESS_TOKEN, response -> {
+            switch (response.getResult()) {
+                case SUCCESS:
+                    handleUserAttached(mode);
+                    break;
+
+                default:
+                    LOG.warn("Attaching user failed");
+
+                    client.stop();
+            }
+        });
+
+        // setup based on mode
         switch (mode) {
             case DOOR:
                 startDoorMode();
@@ -168,9 +186,6 @@ public class GarageApplication {
             case REMOTE:
                 startRemoteMode();
                 break;
-
-            default:
-                return;
         }
 
         // remove the listener
@@ -180,6 +195,43 @@ public class GarageApplication {
         client.stop();
 
         LOG.info("-- garage application finished --");
+    }
+
+    private static void handleUserAttached(Mode mode) {
+        LOG.info("User is attached");
+
+        // create event class family
+        eventFamilyFactory = client.getEventFamilyFactory();
+        garageEventClassFamily = eventFamilyFactory.getGarageEventClassFamily();
+
+        // add event listeners to event class family
+        garageEventClassFamily.addListener(new GarageEventClassFamily.Listener() {
+
+            @Override
+            public void onEvent(GarageDoorStateRequest event, String source) {
+                LOG.info("Got garage door state request, responding");
+
+                // respond to given requester
+                garageEventClassFamily.sendEvent(
+                    new GarageDoorStateResponse(
+                        new GarageDoorStateInfo(true, false, false)
+                    ),
+                    source
+                );
+            }
+
+            @Override
+            public void onEvent(GarageDoorStateResponse event, String source) {
+                GarageDoorStateInfo info = event.getInfo();
+
+                LOG.info("Got garage door state response - open: " + (info.getIsOpen() ? "yes" : "no"));
+            }
+
+            @Override
+            public void onEvent(GarageDoorRemoteCommand event, String source) {
+                LOG.info("Got garage door remote command - open: " + (event.getIsOpen() ? "yes" : "no"));
+            }
+        });
     }
 
     private static void startDoorMode() {
@@ -211,6 +263,7 @@ public class GarageApplication {
 
         // show some help information
         LOG.info("The following commands are available:");
+        LOG.info("> state - request door state");
         LOG.info("> open - opens the garage door");
         LOG.info("> close - closes the garage door");
         LOG.info("> exit - exits the application");
@@ -221,7 +274,11 @@ public class GarageApplication {
         while (isRunning){
             String userInput = getUserInput();
 
-            switch(userInput){
+            switch(userInput) {
+                case "state":
+                    requestDoorState();
+                    break;
+
                 case "open":
                     openDoor();
                     break;
@@ -240,12 +297,71 @@ public class GarageApplication {
         }
     }
 
+    private static void requestDoorState() {
+        LOG.info("Requesting door state");
+
+        GarageDoorStateRequest event = new GarageDoorStateRequest();
+
+        garageEventClassFamily.sendEventToAll(event);
+    }
+
     private static void openDoor() {
-        LOG.info("opening the door");
+        LOG.info("Opening the door");
+
+        GarageDoorRemoteCommand event = new GarageDoorRemoteCommand();
+        event.setIsOpen(true);
+
+        sendRemoteCommandEvent(event);
     }
 
     private static void closeDoor() {
-        LOG.info("closing the door");
+        LOG.info("Closing the door");
+
+        GarageDoorRemoteCommand event = new GarageDoorRemoteCommand();
+        event.setIsOpen(false);
+
+        sendRemoteCommandEvent(event);
+    }
+
+    private static void sendRemoteCommandEvent(GarageDoorRemoteCommand event) {
+        if (garageEventClassFamily == null) {
+            LOG.warn("Sending remote command event requested but event class family is not available");
+
+            return;
+        }
+
+        LOG.info("Sending remote command event (open: " + (event.getIsOpen() ? "yes" : "no") + ")");
+
+        garageEventClassFamily.sendEventToAll(event);
+
+        /*
+        // build list of fully-qualified-names of event listeners
+        List<String> listenerFQNs = new LinkedList<>();
+        listenerFQNs.add(GarageDoorStateRequest.class.getName());
+        listenerFQNs.add(GarageDoorRemoteCommand.class.getName());
+
+        client.findEventListeners(listenerFQNs, new FindEventListenersCallback() {
+            @Override
+            public void onEventListenersReceived(List<String> eventListeners) {
+                LOG.info("Received " + eventListeners.size() + " event listeners");
+
+                for (String listener : eventListeners) {
+                    LOG.info("Sending state and opening events to {}", listener);
+
+                    TransactionId transactionId = eventFamilyFactory.startEventsBlock();
+
+                    garageEventClassFamily.addEventToBlock(transactionId, event, listener);
+
+                    eventFamilyFactory.submitEventsBlock(transactionId);
+                }
+            }
+
+            @Override
+            public void onRequestFailed() {
+                LOG.warn("Fetching event listeners failed");
+            }
+        });
+        */
     }
 
     private static void showConfiguration() {
@@ -271,11 +387,13 @@ public class GarageApplication {
 
     private static List<Long> extractOptionalTopicIds(List<Topic> list) {
         List<Long> topicIds = new ArrayList<>();
+
         for (Topic t : list) {
             if (t.getSubscriptionType() == SubscriptionType.OPTIONAL_SUBSCRIPTION) {
                 topicIds.add(t.getId());
             }
         }
+
         return topicIds;
     }
 
